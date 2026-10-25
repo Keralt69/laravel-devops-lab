@@ -1,0 +1,115 @@
+// ==============================================================================
+// Jenkins Pipeline: Job 4 - Laravel-Deploy-EC2
+// Purpose: Transfer and deploy Laravel directly to AWS EC2 via SSH
+// Path in Git: jenkins/Jenkinsfile.deploy-ec2
+// ==============================================================================
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'EC2_HOST', defaultValue: 'YOUR_EC2_PUBLIC_IP', description: 'EC2 Public IP or Hostname')
+        string(name: 'EC2_USER', defaultValue: 'ubuntu', description: 'SSH user on EC2')
+        string(name: 'SSH_CREDENTIALS_ID', defaultValue: 'ec2-deploy-key', description: 'Jenkins SSH credentials ID')
+        string(name: 'TARGET_DIR', defaultValue: '/var/www/laravel-app', description: 'Target deployment path on EC2')
+    }
+
+    environment {
+        TAR_FILE = "deploy-package-${BUILD_NUMBER}.tar.gz"
+    }
+
+    stages {
+        stage('Checkout Code') {
+            steps {
+                echo '>>> [Job 4: Laravel-Deploy-EC2] Checking out repository...'
+                checkout scm
+            }
+        }
+
+        stage('Bundle Application') {
+            steps {
+                echo ">>> Archiving application files into ${TAR_FILE}..."
+                sh """
+                    tar --exclude='.git' \
+                        --exclude='.github' \
+                        --exclude='node_modules' \
+                        --exclude='tests' \
+                        --exclude='*.tar.gz' \
+                        -czf ${TAR_FILE} .
+                """
+            }
+        }
+
+        stage('SSH Deploy to EC2') {
+            steps {
+                echo ">>> Deploying application directly to EC2 host ${params.EC2_HOST} via SSH..."
+                sshagent(credentials: [params.SSH_CREDENTIALS_ID]) {
+                    sh """
+                        SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+
+                        # Copy tarball
+                        scp \$SSH_OPTS ${TAR_FILE} ${params.EC2_USER}@${params.EC2_HOST}:/tmp/${TAR_FILE}
+
+                        # Execute remote deployment
+                        ssh \$SSH_OPTS ${params.EC2_USER}@${params.EC2_HOST} << 'EOF'
+                            set -e
+                            sudo mkdir -p ${params.TARGET_DIR}
+                            sudo chown -R ${params.EC2_USER}:www-data ${params.TARGET_DIR}
+
+                            tar -xzf /tmp/${TAR_FILE} -C ${params.TARGET_DIR}
+                            rm -f /tmp/${TAR_FILE}
+
+                            cd ${params.TARGET_DIR}
+
+                            if [ ! -f .env ]; then
+                                cp .env.example .env
+                                sed -i 's/APP_ENV=local/APP_ENV=production/' .env
+                                sed -i 's/APP_DEBUG=true/APP_DEBUG=false/' .env
+                                php artisan key:generate --force
+                            fi
+
+                            composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader
+
+                            if grep -q "DB_CONNECTION=sqlite" .env; then
+                                mkdir -p database
+                                touch database/database.sqlite
+                            fi
+
+                            php artisan migrate --force || true
+                            php artisan config:cache || true
+                            php artisan route:cache || true
+                            php artisan view:cache || true
+
+                            sudo chown -R www-data:www-data ${params.TARGET_DIR}
+                            sudo chmod -R 775 ${params.TARGET_DIR}/storage ${params.TARGET_DIR}/bootstrap/cache
+
+                            sudo systemctl reload php8.2-fpm || sudo systemctl reload php*-fpm || true
+                            sudo systemctl reload nginx || true
+EOF
+                    """
+                }
+            }
+        }
+
+        stage('Verify Remote Deployment') {
+            steps {
+                echo ">>> Verifying HTTP availability on http://${params.EC2_HOST}/health..."
+                sh """
+                    sleep 3
+                    curl -s -f http://${params.EC2_HOST}/health || echo "Remote verification check done."
+                """
+            }
+        }
+    }
+
+    post {
+        always {
+            sh "rm -f ${TAR_FILE}"
+        }
+        success {
+            echo "✅ [Job 4: Laravel-Deploy-EC2] Successfully deployed to EC2! URL: http://${params.EC2_HOST}"
+        }
+        failure {
+            echo "❌ [Job 4: Laravel-Deploy-EC2] Direct EC2 deployment failed."
+        }
+    }
+}

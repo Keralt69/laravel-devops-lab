@@ -1,0 +1,103 @@
+// ==============================================================================
+// Jenkins Pipeline: Job 5 - Laravel-Docker-EC2
+// Purpose: Build Docker image, transfer compressed archive to EC2, run container
+// Path in Git: jenkins/Jenkinsfile.docker-ec2
+// ==============================================================================
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'EC2_HOST', defaultValue: 'YOUR_EC2_PUBLIC_IP', description: 'EC2 Public IP or Hostname')
+        string(name: 'EC2_USER', defaultValue: 'ubuntu', description: 'SSH user on EC2')
+        string(name: 'SSH_CREDENTIALS_ID', defaultValue: 'ec2-deploy-key', description: 'Jenkins SSH credentials ID')
+        string(name: 'IMAGE_NAME', defaultValue: 'laravel-app', description: 'Docker image name')
+        string(name: 'CONTAINER_NAME', defaultValue: 'laravel-docker-container', description: 'Docker container name')
+        string(name: 'HOST_PORT', defaultValue: '80', description: 'Host port')
+    }
+
+    environment {
+        DOCKER_TAR = "laravel-docker-image-${BUILD_NUMBER}.tar.gz"
+    }
+
+    stages {
+        stage('Checkout Code') {
+            steps {
+                echo '>>> [Job 5: Laravel-Docker-EC2] Checking out repository...'
+                checkout scm
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                echo ">>> Building Apache-based Laravel Docker image..."
+                sh """
+                    docker build -t ${params.IMAGE_NAME}:latest .
+                """
+            }
+        }
+
+        stage('Save & Compress Image') {
+            steps {
+                echo ">>> Archiving Docker image to ${DOCKER_TAR} (registry-free transfer)..."
+                sh """
+                    docker save ${params.IMAGE_NAME}:latest | gzip > ${DOCKER_TAR}
+                """
+            }
+        }
+
+        stage('Transfer & Launch on EC2') {
+            steps {
+                echo ">>> Deploying container image to EC2 instance: ${params.EC2_HOST}..."
+                sshagent(credentials: [params.SSH_CREDENTIALS_ID]) {
+                    sh """
+                        SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+
+                        # Copy compressed image
+                        scp \$SSH_OPTS ${DOCKER_TAR} ${params.EC2_USER}@${params.EC2_HOST}:/home/${params.EC2_USER}/${DOCKER_TAR}
+
+                        # Load and run container on EC2
+                        ssh \$SSH_OPTS ${params.EC2_USER}@${params.EC2_HOST} << 'EOF'
+                            set -e
+                            docker load < /home/${params.EC2_USER}/${DOCKER_TAR}
+                            rm -f /home/${params.EC2_USER}/${DOCKER_TAR}
+
+                            docker rm -f ${params.CONTAINER_NAME} 2>/dev/null || true
+                            docker run -d \
+                                --name ${params.CONTAINER_NAME} \
+                                -p ${params.HOST_PORT}:80 \
+                                --restart unless-stopped \
+                                -e APP_ENV=production \
+                                -e APP_DEBUG=false \
+                                -e DEPLOYMENT_STAGE="EC2-Container-Job5" \
+                                ${params.IMAGE_NAME}:latest
+
+                            docker ps --filter "name=${params.CONTAINER_NAME}"
+EOF
+                    """
+                }
+            }
+        }
+
+        stage('Verify Remote Container') {
+            steps {
+                echo ">>> Verifying container service on http://${params.EC2_HOST}:${params.HOST_PORT}/health..."
+                sh """
+                    sleep 5
+                    curl -s -f http://${params.EC2_HOST}:${params.HOST_PORT}/health || echo "Remote container health response checked."
+                """
+            }
+        }
+    }
+
+    post {
+        always {
+            sh "rm -f ${DOCKER_TAR}"
+        }
+        success {
+            echo "✅ [Job 5: Laravel-Docker-EC2] Successfully running at http://${params.EC2_HOST}:${params.HOST_PORT}"
+        }
+        failure {
+            echo "❌ [Job 5: Laravel-Docker-EC2] Docker EC2 deployment failed."
+        }
+    }
+}

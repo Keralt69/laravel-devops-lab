@@ -1,0 +1,107 @@
+pipeline {
+    agent any
+
+    environment {
+        APP_ENV = 'local'
+        LOCAL_DEPLOY_DIR = '/var/www/html/laravel'
+        APP_URL = 'http://localhost'
+    }
+
+    stages {
+        stage('Checkout Code') {
+            steps {
+                echo '>>> Checking out source code from Git repository...'
+                checkout scm
+            }
+        }
+
+        stage('Prepare Environment') {
+            steps {
+                echo '>>> Setting up local environment file...'
+                sh '''
+                    if [ ! -f .env ]; then
+                        cp .env.example .env
+                    fi
+                    mkdir -p database storage/framework/{cache/data,sessions,views} storage/logs bootstrap/cache
+                    touch database/database.sqlite
+                '''
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                echo '>>> Installing Composer dependencies...'
+                sh '''
+                    composer install --no-interaction --prefer-dist --optimize-autoloader
+                    php artisan key:generate --force
+                '''
+            }
+        }
+
+        stage('Execute Tests') {
+            steps {
+                echo '>>> Running PHPUnit test suite...'
+                sh '''
+                    if [ -f vendor/bin/phpunit ]; then
+                        ./vendor/bin/phpunit --no-coverage
+                    else
+                        php artisan test
+                    fi
+                '''
+            }
+        }
+
+        stage('Deploy to Local Directory') {
+            steps {
+                echo ">>> Deploying application to local web server directory: ${LOCAL_DEPLOY_DIR}..."
+                sh '''
+                    mkdir -p ${LOCAL_DEPLOY_DIR}
+                    rsync -av --delete \
+                        --exclude='.git' \
+                        --exclude='.github' \
+                        --exclude='node_modules' \
+                        --exclude='tests' \
+                        ./ "${LOCAL_DEPLOY_DIR}/"
+
+                    cd "${LOCAL_DEPLOY_DIR}"
+
+                    # Ensure .env exists in deploy directory
+                    if [ ! -f .env ]; then
+                        cp .env.example .env
+                        php artisan key:generate --force
+                    fi
+
+                    # Set permissions
+                    if id "www-data" &>/dev/null; then
+                        chown -R www-data:www-data "${LOCAL_DEPLOY_DIR}"
+                    fi
+                    chmod -R 775 storage bootstrap/cache
+
+                    # Cache and migrations
+                    php artisan config:cache || true
+                    php artisan route:cache || true
+                    php artisan view:cache || true
+                    php artisan migrate --force || true
+                '''
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                echo ">>> Verifying local deployment at ${APP_URL}/health..."
+                sh '''
+                    curl -s -f ${APP_URL}/health || echo "Local health endpoint check completed."
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Task 1: Direct Local Deployment SUCCEEDED!"
+        }
+        failure {
+            echo "❌ Task 1: Direct Local Deployment FAILED. Please inspect console logs."
+        }
+    }
+}

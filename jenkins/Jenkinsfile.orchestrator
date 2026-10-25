@@ -1,0 +1,95 @@
+// ==============================================================================
+// Jenkins Pipeline: Job 6 - Laravel-Full-Pipeline
+// Purpose: Orchestrator Pipeline - Triggers CI and deployment jobs in sequence
+// Path in Git: jenkins/Jenkinsfile.orchestrator
+// ==============================================================================
+pipeline {
+    agent any
+
+    parameters {
+        choice(
+            name: 'DEPLOY_TARGET',
+            choices: ['All', 'Local-Direct', 'Local-Docker', 'EC2-Direct', 'EC2-Docker'],
+            description: 'Select deployment targets to trigger after successful CI'
+        )
+        string(name: 'EC2_HOST', defaultValue: 'YOUR_EC2_PUBLIC_IP', description: 'EC2 Public IP for EC2 deployments')
+        booleanParam(name: 'WAIT_FOR_DOWNSTREAM', defaultValue: true, description: 'Wait for downstream jobs to complete')
+    }
+
+    stages {
+        stage('Stage 1: Continuous Integration') {
+            steps {
+                echo '>>> [Orchestrator] Triggering Job 1: Laravel-CI...'
+                build job: 'Laravel-CI',
+                      wait: true,
+                      propagate: true
+                echo '>>> Job 1 (Laravel-CI) passed successfully!'
+            }
+        }
+
+        stage('Stage 2: Deploy to Local (Direct)') {
+            when {
+                expression { return params.DEPLOY_TARGET in ['All', 'Local-Direct'] }
+            }
+            steps {
+                echo '>>> [Orchestrator] Triggering Job 2: Laravel-Deploy-Local...'
+                build job: 'Laravel-Deploy-Local',
+                      wait: params.WAIT_FOR_DOWNSTREAM,
+                      propagate: true
+            }
+        }
+
+        stage('Stage 3: Deploy to Local (Docker)') {
+            when {
+                expression { return params.DEPLOY_TARGET in ['All', 'Local-Docker'] }
+            }
+            steps {
+                echo '>>> [Orchestrator] Triggering Job 3: Laravel-Docker-Local...'
+                build job: 'Laravel-Docker-Local',
+                      wait: params.WAIT_FOR_DOWNSTREAM,
+                      propagate: true
+            }
+        }
+
+        stage('Stage 4: Deploy to EC2 (Direct SSH)') {
+            when {
+                expression { return params.DEPLOY_TARGET in ['All', 'EC2-Direct'] }
+            }
+            steps {
+                echo '>>> [Orchestrator] Triggering Job 4: Laravel-Deploy-EC2...'
+                build job: 'Laravel-Deploy-EC2',
+                      parameters: [
+                          string(name: 'EC2_HOST', value: params.EC2_HOST)
+                      ],
+                      wait: params.WAIT_FOR_DOWNSTREAM,
+                      propagate: true
+            }
+        }
+
+        stage('Stage 5: Deploy to EC2 (Docker)') {
+            when {
+                expression { return params.DEPLOY_TARGET in ['All', 'EC2-Docker'] }
+            }
+            steps {
+                echo '>>> [Orchestrator] Triggering Job 5: Laravel-Docker-EC2...'
+                build job: 'Laravel-Docker-EC2',
+                      parameters: [
+                          string(name: 'EC2_HOST', value: params.EC2_HOST)
+                      ],
+                      wait: params.WAIT_FOR_DOWNSTREAM,
+                      propagate: true
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "======================================================================"
+            echo " 🎉 [Job 6: Laravel-Full-Pipeline] All orchestrated stages finished!"
+            echo "======================================================================"
+        }
+        failure {
+            echo "❌ [Job 6: Laravel-Full-Pipeline] One or more downstream jobs failed."
+        }
+    }
+}

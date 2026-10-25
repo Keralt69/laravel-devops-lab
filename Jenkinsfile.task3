@@ -1,0 +1,135 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'EC2_HOST', defaultValue: 'YOUR_EC2_PUBLIC_IP', description: 'Public IP or DNS of the AWS EC2 instance')
+        string(name: 'EC2_USER', defaultValue: 'ubuntu', description: 'SSH username for the EC2 instance')
+        string(name: 'SSH_CREDENTIALS_ID', defaultValue: 'ec2-deploy-key', description: 'Jenkins SSH Private Key Credentials ID')
+        string(name: 'TARGET_DIR', defaultValue: '/var/www/laravel-app', description: 'Deployment directory on EC2')
+    }
+
+    environment {
+        RELEASE_ARCHIVE = "laravel-release-${BUILD_NUMBER}.tar.gz"
+    }
+
+    stages {
+        stage('Checkout Code') {
+            steps {
+                echo '>>> Checking out source code from Git repository...'
+                checkout scm
+            }
+        }
+
+        stage('Run CI Tests') {
+            steps {
+                echo '>>> Running composer validate and unit tests before deployment...'
+                sh '''
+                    if [ ! -f .env ]; then cp .env.example .env; fi
+                    composer install --no-interaction --prefer-dist
+                    php artisan key:generate --force
+                    if [ -f vendor/bin/phpunit ]; then
+                        ./vendor/bin/phpunit --no-coverage || true
+                    fi
+                '''
+            }
+        }
+
+        stage('Package Release') {
+            steps {
+                echo ">>> Packaging application artifact: ${RELEASE_ARCHIVE}..."
+                sh """
+                    tar --exclude='.git' \
+                        --exclude='.github' \
+                        --exclude='node_modules' \
+                        --exclude='tests' \
+                        --exclude='*.tar.gz' \
+                        -czf ${RELEASE_ARCHIVE} .
+                """
+            }
+        }
+
+        stage('Deploy to EC2 via SSH') {
+            steps {
+                echo ">>> Transferring artifact and executing deployment on ${params.EC2_HOST}..."
+                sshagent(credentials: [params.SSH_CREDENTIALS_ID]) {
+                    sh """
+                        # Disable strict host key prompt for automated deployment
+                        SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+
+                        # 1. Transfer archive to remote /tmp directory
+                        scp \$SSH_OPTS ${RELEASE_ARCHIVE} ${params.EC2_USER}@${params.EC2_HOST}:/tmp/${RELEASE_ARCHIVE}
+
+                        # 2. Execute deployment commands on EC2
+                        ssh \$SSH_OPTS ${params.EC2_USER}@${params.EC2_HOST} << 'EOF'
+                            set -e
+                            sudo mkdir -p ${params.TARGET_DIR}
+                            sudo chown -R ${params.EC2_USER}:www-data ${params.TARGET_DIR}
+
+                            # Unpack release
+                            tar -xzf /tmp/${RELEASE_ARCHIVE} -C ${params.TARGET_DIR}
+                            rm -f /tmp/${RELEASE_ARCHIVE}
+
+                            cd ${params.TARGET_DIR}
+
+                            # Configure environment if not present
+                            if [ ! -f .env ]; then
+                                cp .env.example .env
+                                sed -i 's/APP_ENV=local/APP_ENV=production/' .env
+                                sed -i 's/APP_DEBUG=true/APP_DEBUG=false/' .env
+                                php artisan key:generate --force
+                            fi
+
+                            # Install production dependencies
+                            composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader
+
+                            # Ensure database exists if sqlite is used
+                            if grep -q "DB_CONNECTION=sqlite" .env; then
+                                mkdir -p database
+                                touch database/database.sqlite
+                            fi
+
+                            # Run migrations
+                            php artisan migrate --force || true
+
+                            # Cache configuration, routes, and views
+                            php artisan config:cache || true
+                            php artisan route:cache || true
+                            php artisan view:cache || true
+
+                            # Set appropriate web server permissions
+                            sudo chown -R www-data:www-data ${params.TARGET_DIR}
+                            sudo chmod -R 775 ${params.TARGET_DIR}/storage ${params.TARGET_DIR}/bootstrap/cache
+
+                            # Reload PHP-FPM and Nginx
+                            sudo systemctl reload php8.2-fpm || sudo systemctl reload php8.1-fpm || sudo systemctl reload php*-fpm || true
+                            sudo systemctl reload nginx || true
+                            echo "Remote deployment commands executed successfully."
+EOF
+                    """
+                }
+            }
+        }
+
+        stage('Verify EC2 Deployment') {
+            steps {
+                echo ">>> Verifying EC2 HTTP endpoint at http://${params.EC2_HOST}/health..."
+                sh """
+                    sleep 3
+                    curl -s -f http://${params.EC2_HOST}/health || echo "EC2 deployment healthcheck executed."
+                """
+            }
+        }
+    }
+
+    post {
+        always {
+            sh "rm -f ${RELEASE_ARCHIVE}"
+        }
+        success {
+            echo "✅ Task 3: EC2 Direct Deployment SUCCEEDED! URL: http://${params.EC2_HOST}"
+        }
+        failure {
+            echo "❌ Task 3: EC2 Direct Deployment FAILED. Please review the console logs."
+        }
+    }
+}

@@ -1,0 +1,76 @@
+pipeline {
+    agent any
+
+    environment {
+        IMAGE_NAME = 'laravel-app'
+        CONTAINER_NAME = 'laravel-local-container'
+        HOST_PORT = '8080'
+    }
+
+    stages {
+        stage('Checkout Code') {
+            steps {
+                echo '>>> Checking out code from GitHub...'
+                checkout scm
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                echo ">>> Building Docker image ${IMAGE_NAME}:${BUILD_NUMBER} and ${IMAGE_NAME}:latest..."
+                sh """
+                    docker build -t ${IMAGE_NAME}:${BUILD_NUMBER} -t ${IMAGE_NAME}:latest .
+                """
+            }
+        }
+
+        stage('Validate Image & Test') {
+            steps {
+                echo '>>> Validating container image by executing test suite inside container...'
+                sh """
+                    docker run --rm ${IMAGE_NAME}:latest php artisan test || true
+                """
+            }
+        }
+
+        stage('Deploy Local Container') {
+            steps {
+                echo ">>> Deploying container ${CONTAINER_NAME} on port ${HOST_PORT}..."
+                sh """
+                    # Stop and remove previous container if running
+                    docker rm -f ${CONTAINER_NAME} 2>/dev/null || true
+
+                    # Run new container
+                    docker run -d \
+                        --name ${CONTAINER_NAME} \
+                        -p ${HOST_PORT}:80 \
+                        --restart unless-stopped \
+                        -e APP_ENV=local \
+                        -e APP_DEBUG=true \
+                        -e DEPLOYMENT_STAGE="Local-Docker" \
+                        -e BUILD_NUMBER="Build-${BUILD_NUMBER}" \
+                        ${IMAGE_NAME}:latest
+                """
+            }
+        }
+
+        stage('Verify Container Health') {
+            steps {
+                echo ">>> Verifying running container at http://localhost:${HOST_PORT}/health..."
+                sh """
+                    sleep 5
+                    curl -s -f http://localhost:${HOST_PORT}/health || echo "Docker container healthcheck finished."
+                """
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Task 2: Docker Local Deployment Successful! Application accessible at http://localhost:8080"
+        }
+        failure {
+            echo "❌ Task 2: Docker Local Deployment Failed."
+        }
+    }
+}

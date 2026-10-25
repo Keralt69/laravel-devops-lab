@@ -1,0 +1,61 @@
+// ==============================================================================
+// Jenkins Pipeline: Job 1 - Laravel-CI
+// Purpose: Continuous Integration - Pull code, install dependencies, run tests
+// Path in Git: jenkins/Jenkinsfile.ci
+// ==============================================================================
+pipeline {
+    agent any
+
+    environment {
+        APP_ENV = 'testing'
+    }
+
+    stages {
+        stage('Checkout Code') {
+            steps {
+                echo '>>> [Job 1: Laravel-CI] Checking out repository...'
+                checkout scm
+            }
+        }
+
+        stage('Validate Composer') {
+            steps {
+                echo '>>> Validating composer.json syntax and lock compliance...'
+                sh 'composer validate --strict --no-check-all'
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                echo '>>> Installing Composer dependencies...'
+                sh '''
+                    if [ ! -f .env ]; then cp .env.example .env; fi
+                    composer install --no-interaction --prefer-dist --optimize-autoloader
+                    php artisan key:generate --force
+                '''
+            }
+        }
+
+        stage('Run Automated Tests') {
+            steps {
+                echo '>>> Running PHPUnit Unit and Feature tests...'
+                sh '''
+                    if [ -f vendor/bin/phpunit ]; then
+                        ./vendor/bin/phpunit --colors=never
+                    else
+                        php artisan test
+                    fi
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ [Job 1: Laravel-CI] Tests PASSED! Code is healthy and ready for deployment."
+        }
+        failure {
+            echo "❌ [Job 1: Laravel-CI] Tests FAILED! Build halted."
+        }
+    }
+}

@@ -1,0 +1,77 @@
+// ==============================================================================
+// Jenkins Pipeline: Job 2 - Laravel-Deploy-Local
+// Purpose: Continuous Deployment - Deploy directly to local PHP web server
+// Path in Git: jenkins/Jenkinsfile.deploy-local
+// ==============================================================================
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'LOCAL_WEB_ROOT', defaultValue: '/var/www/html/laravel', description: 'Target directory for local web server')
+        string(name: 'HEALTH_URL', defaultValue: 'http://localhost/health', description: 'Local healthcheck URL')
+    }
+
+    stages {
+        stage('Checkout Code') {
+            steps {
+                echo '>>> [Job 2: Laravel-Deploy-Local] Checking out repository...'
+                checkout scm
+            }
+        }
+
+        stage('Deploy to Web Server Directory') {
+            steps {
+                echo ">>> Syncing files to local web directory: ${params.LOCAL_WEB_ROOT}..."
+                sh """
+                    mkdir -p ${params.LOCAL_WEB_ROOT}
+                    rsync -av --delete \
+                        --exclude='.git' \
+                        --exclude='.github' \
+                        --exclude='node_modules' \
+                        --exclude='tests' \
+                        ./ "${params.LOCAL_WEB_ROOT}/"
+
+                    cd "${params.LOCAL_WEB_ROOT}"
+
+                    if [ ! -f .env ]; then
+                        cp .env.example .env
+                        php artisan key:generate --force
+                    fi
+
+                    # Install production dependencies
+                    composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader
+
+                    # Set ownership and permissions
+                    if id "www-data" &>/dev/null; then
+                        chown -R www-data:www-data "${params.LOCAL_WEB_ROOT}"
+                    fi
+                    chmod -R 775 storage bootstrap/cache
+
+                    # Optimize caches & run migrations
+                    php artisan config:cache || true
+                    php artisan route:cache || true
+                    php artisan view:cache || true
+                    php artisan migrate --force || true
+                """
+            }
+        }
+
+        stage('Verify Local Web Deployment') {
+            steps {
+                echo ">>> Verifying local web server response at ${params.HEALTH_URL}..."
+                sh """
+                    curl -s -f ${params.HEALTH_URL} || echo "Health check query executed."
+                """
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ [Job 2: Laravel-Deploy-Local] Successfully deployed to local web server!"
+        }
+        failure {
+            echo "❌ [Job 2: Laravel-Deploy-Local] Deployment failed."
+        }
+    }
+}

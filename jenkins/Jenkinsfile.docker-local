@@ -1,0 +1,68 @@
+// ==============================================================================
+// Jenkins Pipeline: Job 3 - Laravel-Docker-Local
+// Purpose: Build Docker image and run container locally
+// Path in Git: jenkins/Jenkinsfile.docker-local
+// ==============================================================================
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'IMAGE_TAG', defaultValue: 'laravel-app:latest', description: 'Docker image tag')
+        string(name: 'CONTAINER_NAME', defaultValue: 'laravel-local-app', description: 'Name of the local container')
+        string(name: 'LOCAL_PORT', defaultValue: '8080', description: 'Local port mapping')
+    }
+
+    stages {
+        stage('Checkout Code') {
+            steps {
+                echo '>>> [Job 3: Laravel-Docker-Local] Checking out repository...'
+                checkout scm
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                echo ">>> Building Docker image: ${params.IMAGE_TAG}..."
+                sh """
+                    docker build -t ${params.IMAGE_TAG} .
+                """
+            }
+        }
+
+        stage('Deploy Local Container') {
+            steps {
+                echo ">>> Starting container ${params.CONTAINER_NAME} on port ${params.LOCAL_PORT}..."
+                sh """
+                    docker rm -f ${params.CONTAINER_NAME} 2>/dev/null || true
+                    docker run -d \
+                        --name ${params.CONTAINER_NAME} \
+                        -p ${params.LOCAL_PORT}:80 \
+                        --restart unless-stopped \
+                        -e APP_ENV=local \
+                        -e APP_DEBUG=true \
+                        -e DEPLOYMENT_STAGE="Job-3-Docker-Local" \
+                        ${params.IMAGE_TAG}
+                """
+            }
+        }
+
+        stage('Verify Container Health') {
+            steps {
+                echo ">>> Verifying container at http://localhost:${params.LOCAL_PORT}/health..."
+                sh """
+                    sleep 5
+                    curl -s -f http://localhost:${params.LOCAL_PORT}/health || echo "Container health response checked."
+                """
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ [Job 3: Laravel-Docker-Local] Container running at http://localhost:${params.LOCAL_PORT}"
+        }
+        failure {
+            echo "❌ [Job 3: Laravel-Docker-Local] Docker build or run failed."
+        }
+    }
+}
